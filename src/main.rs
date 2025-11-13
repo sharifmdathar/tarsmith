@@ -34,6 +34,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let choice = choice.trim();
 
     let (install_dir, is_user_level) = if choice == "2" {
+        // Check sudo permissions before proceeding with system-wide installation
+        if !check_sudo_permissions() {
+            eprintln!("Error: System-wide installation requires sudo privileges.");
+            eprintln!("Please run with: sudo tarsmith {}", archive_path.display());
+            eprintln!("Or choose user-level installation (option 1) which doesn't require sudo.");
+            std::process::exit(1);
+        }
         (Path::new("/opt").to_path_buf(), false)
     } else {
         (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
@@ -277,6 +284,34 @@ Installation complete! 🎉"
     }
 
     Ok(())
+}
+
+/// Checks if the current user has sudo/root permissions for system-wide installation
+/// Returns true if we can write to /opt (either as root or with sudo)
+fn check_sudo_permissions() -> bool {
+    let opt_path = Path::new("/opt");
+
+    // Try to create a test file in /opt to check write permissions
+    let test_file = opt_path.join(".tarsmith_test_write_permissions");
+
+    // Try writing a test file
+    match fs::write(&test_file, "test") {
+        Ok(_) => {
+            // Successfully wrote, clean up and return true
+            fs::remove_file(&test_file).ok();
+            true
+        }
+        Err(_) => {
+            // Can't write, check if sudo is available and works
+            let sudo_check = Command::new("sudo").arg("-n").arg("true").output();
+
+            if let Ok(output) = sudo_check {
+                output.status.success()
+            } else {
+                false
+            }
+        }
+    }
 }
 
 /// Detects the main extracted directory by trying multiple strategies:

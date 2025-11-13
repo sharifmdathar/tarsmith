@@ -1,7 +1,11 @@
 [package]
 name = "tarsmith"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
+license = "MIT"
+authors = ["sharifmdathar"]
+description = "A simple, interactive installer for tar archives"
+repository = "https://github.com/sharifmdathar/tarsmith"
 
 [dependencies]
 dirs = "6.0.0"
