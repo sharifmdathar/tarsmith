@@ -1,7 +1,3 @@
-// Full version of TarSmith installer
-// This performs real actions: file checks, extraction, folder detection, desktop entry creation.
-// Note: Requires running with sudo for installing into /opt and writing desktop files.
-
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -40,7 +36,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (install_dir, is_user_level) = if choice == "2" {
         (Path::new("/opt").to_path_buf(), false)
     } else {
-        // Default to user-level (option 1)
         (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
     };
 
@@ -53,10 +48,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("[2] Install directory ready ✔");
 
-    // Step 3: Extracting archive
     println!("[3] Extracting archive...");
 
-    // Detect compression format from file extension
+    // Detect compression format and select appropriate tar flags
     let tar_flags = archive_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -77,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut cmd = Command::new("tar");
 
-    // Handle zstd separately as it needs multiple args
+    // zstd requires separate --zstd flag, not combined with -x
     if tar_flags.contains("zstd") {
         cmd.args(&["--zstd", "-xf", archive_path.to_str().unwrap()]);
     } else {
@@ -94,76 +88,85 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("[3] Extraction complete ✔");
 
-    // Step 4: Try to detect extracted directory
     println!("[4] Detecting installation folder...");
-
     let extracted_path = detect_extracted_folder(&install_dir, archive_path)?;
     println!(
         "[4] Detected installation directory: {} ✔",
         extracted_path.display()
     );
 
-    // Infer app name from extracted folder
     let app_name = infer_app_name(&extracted_path)?;
     println!("[4] Inferred app name: {} ✔", app_name);
 
-    // Step 5: Find executable
-    println!("[5] Finding executable...");
     let exec_path = extracted_path.join("bin");
     let executables = find_executables_in_bin(&exec_path)?;
 
-    let exec_file = if executables.len() == 1 {
-        executables[0].clone()
+    // Select executable for desktop entry (GUI launcher)
+    println!("[5] Select executable for desktop entry (GUI launch):");
+    let desktop_exec = if executables.len() == 1 {
+        println!(
+            "  Only one executable found, using: {}",
+            executables[0]
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        Some(executables[0].clone())
     } else {
-        println!("Multiple executables found:");
+        println!("  Executables found:");
         for (i, exe) in executables.iter().enumerate() {
             println!(
-                "  {}) {}",
+                "    {}) {}",
                 i + 1,
                 exe.file_name().unwrap_or_default().to_string_lossy()
             );
         }
-        print!("Select executable (1-{}): ", executables.len());
+        println!("    0) Skip desktop entry");
+        print!(
+            "  Select executable (0-{}) [default: 0]: ",
+            executables.len()
+        );
         io::stdout().flush()?;
 
         let mut selection = String::new();
         io::stdin().read_line(&mut selection)?;
-        let selection: usize = selection.trim().parse().map_err(|_| "Invalid selection")?;
+        let selection = selection.trim();
 
-        if selection < 1 || selection > executables.len() {
-            return Err("Invalid selection".into());
+        if selection.is_empty() || selection == "0" {
+            None
+        } else {
+            let selection: usize = selection.parse().map_err(|_| "Invalid selection")?;
+            if selection < 1 || selection > executables.len() {
+                return Err("Invalid selection".into());
+            }
+            Some(executables[selection - 1].clone())
+        }
+    };
+
+    // Create desktop entry if an executable was selected
+    if let Some(exec_file) = &desktop_exec {
+        println!("[6] Creating desktop entry...");
+        let desktop_filename = format!("{}.desktop", app_name);
+        let desktop_path = if is_user_level {
+            dirs::home_dir()
+                .unwrap()
+                .join(".local/share/applications")
+                .join(&desktop_filename)
+        } else {
+            Path::new("/usr/share/applications").join(&desktop_filename)
+        };
+
+        // Ensure the applications directory exists
+        if let Some(parent) = desktop_path.parent() {
+            fs::create_dir_all(parent)?;
         }
 
-        executables[selection - 1].clone()
-    };
-    println!(
-        "[5] Selected executable: {} ✔",
-        exec_file.file_name().unwrap_or_default().to_string_lossy()
-    );
+        // Try to find an icon (common locations)
+        let icon_path = find_icon(&extracted_path)
+            .unwrap_or_else(|| extracted_path.join("bin").join("icon.png"));
 
-    // Step 6: Create desktop entry
-    println!("[6] Creating desktop entry...");
-    let desktop_filename = format!("{}.desktop", app_name);
-    let desktop_path = if is_user_level {
-        dirs::home_dir()
-            .unwrap()
-            .join(".local/share/applications")
-            .join(&desktop_filename)
-    } else {
-        Path::new("/usr/share/applications").join(&desktop_filename)
-    };
-
-    // Ensure the applications directory exists
-    if let Some(parent) = desktop_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Try to find an icon (common locations)
-    let icon_path =
-        find_icon(&extracted_path).unwrap_or_else(|| extracted_path.join("bin").join("icon.png"));
-
-    let desktop_contents = format!(
-        "[Desktop Entry]
+        let desktop_contents = format!(
+            "[Desktop Entry]
 Version=1.0
 Type=Application
 Name={}
@@ -172,70 +175,93 @@ Icon={}
 Terminal=false
 Categories=Utility;
 ",
-        app_name,
-        exec_file.display(),
-        icon_path.display()
-    );
-
-    fs::write(&desktop_path, desktop_contents)?;
-    println!("[6] Desktop entry created at: {} ✔", desktop_path.display());
-
-    // Step 7: Optionally add to PATH
-    println!("[7] Add to PATH?");
-    print!("This will create a symlink allowing you to launch from terminal (Y/n): ");
-    io::stdout().flush()?;
-
-    let mut add_to_path = String::new();
-    io::stdin().read_line(&mut add_to_path)?;
-    let add_to_path = add_to_path.trim().to_lowercase();
-
-    // Default to yes (add to PATH) unless explicitly "n" or "no"
-    if add_to_path == "n" || add_to_path == "no" {
-        println!("[7] Skipped adding to PATH ✔");
-    } else {
-        let bin_dir = if is_user_level {
-            dirs::home_dir().unwrap().join(".local/bin")
-        } else {
-            Path::new("/usr/local/bin").to_path_buf()
-        };
-
-        // Ensure bin directory exists
-        if !bin_dir.exists() {
-            fs::create_dir_all(&bin_dir)?;
-        }
-
-        // Use the executable name or app name as the symlink name
-        let symlink_name = exec_file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let symlink_path = bin_dir.join(&symlink_name);
-
-        // Remove existing symlink if it exists
-        if symlink_path.exists() || symlink_path.is_symlink() {
-            fs::remove_file(&symlink_path).ok();
-        }
-
-        // Create symlink
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            symlink(&exec_file, &symlink_path)?;
-        }
-
-        println!(
-            "[7] Symlink created: {} -> {} ✔",
-            symlink_path.display(),
-            exec_file.display()
+            app_name,
+            exec_file.display(),
+            icon_path.display()
         );
 
-        // For user-level installations, ensure ~/.local/bin is in PATH
-        if is_user_level {
-            ensure_local_bin_in_path()?;
-        }
+        fs::write(&desktop_path, desktop_contents)?;
+        println!("[6] Desktop entry created at: {} ✔", desktop_path.display());
+    } else {
+        println!("[6] Skipped desktop entry creation ✔");
+    }
 
-        println!("    You can now run '{}' from your terminal", symlink_name);
+    // Select executables to add to PATH (for terminal access)
+    println!("[7] Select executables to add to PATH (for terminal use):");
+    if executables.len() == 1 {
+        println!(
+            "  Only one executable found: {}",
+            executables[0]
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        print!("  Add to PATH? (Y/n): ");
+        io::stdout().flush()?;
+
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+        let response = response.trim().to_lowercase();
+
+        let selected_for_path = if response == "n" || response == "no" {
+            Vec::new()
+        } else {
+            vec![executables[0].clone()]
+        };
+
+        if !selected_for_path.is_empty() {
+            create_path_symlinks(&selected_for_path, is_user_level)?;
+        } else {
+            println!("[7] Skipped adding to PATH ✔");
+        }
+    } else {
+        println!("  Executables found:");
+        for (i, exe) in executables.iter().enumerate() {
+            println!(
+                "    {}) {}",
+                i + 1,
+                exe.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+        print!(
+            "  Enter numbers separated by commas (e.g., 1,2,3) or 'all' for all [default: all]: "
+        );
+        io::stdout().flush()?;
+
+        let mut selection = String::new();
+        io::stdin().read_line(&mut selection)?;
+        let selection = selection.trim().to_lowercase();
+
+        let selected_for_path = if selection.is_empty() || selection == "all" {
+            executables.clone()
+        } else {
+            // Parse comma-separated selection (e.g., "1,2,3")
+            let indices: Result<Vec<usize>, _> = selection
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<usize>()
+                        .map_err(|_| "Invalid number format".to_string())
+                })
+                .collect();
+
+            let indices = indices.map_err(|e| e)?;
+
+            let mut selected = Vec::new();
+            for idx in indices {
+                if idx < 1 || idx > executables.len() {
+                    return Err(format!("Invalid selection: {}", idx).into());
+                }
+                selected.push(executables[idx - 1].clone());
+            }
+            selected
+        };
+
+        if selected_for_path.is_empty() {
+            println!("[7] Skipped adding to PATH ✔");
+        } else {
+            create_path_symlinks(&selected_for_path, is_user_level)?;
+        }
     }
 
     println!(
@@ -243,11 +269,21 @@ Categories=Utility;
 Installation complete! 🎉"
     );
     println!("Installed to: {}", extracted_path.display());
-    println!("Launch using the system menu or: {}", exec_file.display());
+    if let Some(exec_file) = &desktop_exec {
+        println!(
+            "Desktop entry created for: {}",
+            exec_file.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
 
     Ok(())
 }
 
+/// Detects the main extracted directory by trying multiple strategies:
+/// 1. Exact match with archive name
+/// 2. Name variations (handling hyphens/underscores)
+/// 3. Directories containing bin/ folder (sorted by modification time)
+/// 4. Newest directory as fallback
 fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let stem = archive
         .file_stem()
@@ -260,14 +296,14 @@ fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf
         return Ok(candidate);
     }
 
-    // Get first part of stem, handling both hyphens and underscores
+    // Extract base name (first component before version/platform suffixes)
     let stem_first_part = stem
         .split(&['-', '_'][..])
         .next()
         .unwrap_or(&stem)
         .to_string();
 
-    // Try variations with both hyphens and underscores
+    // Try multiple naming variations (handles both hyphens and underscores)
     let stem_variants = vec![
         stem.clone(),
         stem.replace('_', "-"),
@@ -315,10 +351,10 @@ fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf
     }
 
     if !candidates_with_bin.is_empty() {
-        // Sort by modification time (newest first)
+        // Sort by modification time (newest first) to prioritize recently extracted folders
         candidates_with_bin.sort_by(|a, b| b.1.cmp(&a.1));
 
-        // Try to find one that matches the archive name (prefer newest matching)
+        // Prefer directories matching the archive name, but use newest if multiple matches
         if let Some(matched) = candidates_with_bin.iter().find(|(p, _)| {
             p.file_name()
                 .and_then(|n| n.to_str())
@@ -332,10 +368,11 @@ fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf
             return Ok(matched.0.clone());
         }
 
-        // If no name match, return the newest directory (most recently extracted)
+        // Fallback: return newest directory if no name match found
         return Ok(candidates_with_bin[0].0.clone());
     }
 
+    // Last resort: find newest directory (ignoring bin/ requirement)
     let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
     for entry in fs::read_dir(install_dir)? {
         let entry = entry?;
@@ -355,6 +392,7 @@ fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf
         .ok_or_else(|| "Unable to detect extracted folder".into())
 }
 
+/// Finds all executable files in the bin/ directory by checking file permissions
 fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut executables = Vec::new();
 
@@ -367,6 +405,7 @@ fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
+                // Check if file has execute permission (0o111 = --x--x--x)
                 if perms.mode() & 0o111 != 0 {
                     executables.push(path);
                 }
@@ -381,6 +420,8 @@ fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error
     }
 }
 
+/// Extracts a clean application name from the extracted folder path
+/// Removes version numbers and platform suffixes (e.g., "android-studio-2025.2.1.7-linux" -> "android-studio")
 fn infer_app_name(extracted_path: &Path) -> Result<String, Box<dyn Error>> {
     let folder_name = extracted_path
         .file_name()
@@ -390,7 +431,7 @@ fn infer_app_name(extracted_path: &Path) -> Result<String, Box<dyn Error>> {
     let name = folder_name
         .split('-')
         .take_while(|part| {
-            // Stop at version-like patterns (numbers, "linux", "x64", "amd64", etc.)
+            // Stop when we encounter version numbers or platform identifiers
             !part
                 .chars()
                 .next()
@@ -411,6 +452,7 @@ fn infer_app_name(extracted_path: &Path) -> Result<String, Box<dyn Error>> {
     }
 }
 
+/// Searches common locations for application icon files
 fn find_icon(extracted_path: &Path) -> Option<PathBuf> {
     let common_icon_paths = vec![
         extracted_path.join("bin").join("icon.png"),
@@ -429,6 +471,72 @@ fn find_icon(extracted_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Creates symlinks for selected executables in the appropriate bin directory
+/// For user-level: ~/.local/bin, for system-wide: /usr/local/bin
+fn create_path_symlinks(
+    executables: &[PathBuf],
+    is_user_level: bool,
+) -> Result<(), Box<dyn Error>> {
+    let bin_dir = if is_user_level {
+        dirs::home_dir().unwrap().join(".local/bin")
+    } else {
+        Path::new("/usr/local/bin").to_path_buf()
+    };
+
+    if !bin_dir.exists() {
+        fs::create_dir_all(&bin_dir)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        for exec_file in executables {
+            let symlink_name = exec_file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let symlink_path = bin_dir.join(&symlink_name);
+
+            // Remove existing symlink to avoid conflicts
+            if symlink_path.exists() || symlink_path.is_symlink() {
+                fs::remove_file(&symlink_path).ok();
+            }
+
+            symlink(exec_file, &symlink_path)?;
+            println!(
+                "    Created symlink: {} -> {}",
+                symlink_name,
+                exec_file.display()
+            );
+        }
+    }
+
+    // For user-level installations, ensure ~/.local/bin is in PATH
+    if is_user_level {
+        ensure_local_bin_in_path()?;
+    }
+
+    let names: Vec<String> = executables
+        .iter()
+        .map(|e| {
+            e.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    println!(
+        "    You can now run these commands from your terminal: {}",
+        names.join(", ")
+    );
+
+    Ok(())
+}
+
+/// Ensures ~/.local/bin is added to PATH by modifying the user's shell config file
+/// Detects shell type (bash/zsh/fish) and adds appropriate export statement
 fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
     let local_bin = dirs::home_dir()
         .ok_or("Cannot determine home directory")?
@@ -436,7 +544,7 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
 
     let local_bin_str = local_bin.to_string_lossy().to_string();
 
-    // Check if already in PATH (check each PATH component)
+    // Check if already in PATH by examining each component
     if let Ok(path_var) = env::var("PATH") {
         let path_components: Vec<&str> = path_var.split(':').collect();
         if path_components
@@ -448,7 +556,7 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Detect shell and config file
+    // Detect shell type and determine appropriate config file and export syntax
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let (config_file, path_export) = if shell.contains("zsh") {
         let file = dirs::home_dir().unwrap().join(".zshrc");
@@ -456,7 +564,6 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         (file, export)
     } else if shell.contains("fish") {
         let file = dirs::home_dir().unwrap().join(".config/fish/config.fish");
-        // Ensure fish config directory exists
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent).ok();
         }
@@ -469,7 +576,7 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         (file, export)
     };
 
-    // Check if already added to config file
+    // Avoid duplicate entries in config file
     if config_file.exists() {
         let contents = fs::read_to_string(&config_file)?;
         if contents.contains("$HOME/.local/bin")
@@ -488,7 +595,7 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Append to config file
+    // Append PATH export to shell config file
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
