@@ -13,6 +13,13 @@ A simple, interactive installer for tar archives (`.tar.gz`, `.tar.xz`, `.tar.bz
 - 🐚 **Shell Detection**: Automatically configures PATH for bash, zsh, or fish shells
 - ✨ **Zero Configuration**: Sensible defaults - just press Enter to accept
 
+
+## Demo
+
+Watch TarSmith in action:
+
+https://github.com/user-attachments/assets/2b726305-ffc2-47d7-91fb-f1e544e6a91b
+
 ## Installation
 
 ### Prerequisites
