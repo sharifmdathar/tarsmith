@@ -34,7 +34,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let choice = choice.trim();
 
     let (install_dir, is_user_level) = if choice == "2" {
-        // Check sudo permissions before proceeding with system-wide installation
         if !check_sudo_permissions() {
             eprintln!("Error: System-wide installation requires sudo privileges.");
             eprintln!("Please run with: sudo tarsmith {}", archive_path.display());
@@ -57,46 +56,58 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("[3] Extracting archive...");
 
-    // Detect compression format and select appropriate tar flags
+    let temp_dir = install_dir.join(".tarsmith_temp_extract");
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir)?;
+    }
+    fs::create_dir_all(&temp_dir)?;
+
     let tar_flags = archive_path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| {
             if ext == "gz" || ext == "tgz" {
-                "-xzf" // gzip
+                "-xzf"
             } else if ext == "xz" || ext == "txz" {
-                "-xJf" // xz
+                "-xJf"
             } else if ext == "bz2" {
-                "-xjf" // bzip2
+                "-xjf"
             } else if ext == "zst" {
-                "--zstd -xf" // zstd (needs special handling)
+                "--zstd -xf"
             } else {
-                "-xf" // uncompressed tar
+                "-xf"
             }
         })
         .unwrap_or("-xf");
 
     let mut cmd = Command::new("tar");
 
-    // zstd requires separate --zstd flag, not combined with -x
     if tar_flags.contains("zstd") {
-        cmd.args(&["--zstd", "-xf", archive_path.to_str().unwrap()]);
+        cmd.args(["--zstd", "-xf", archive_path.to_str().unwrap()]);
     } else {
         cmd.arg(tar_flags);
         cmd.arg(archive_path);
     }
 
-    cmd.arg("-C").arg(&install_dir);
+    cmd.arg("-C").arg(&temp_dir);
 
     let status = cmd.status()?;
 
     if !status.success() {
+        fs::remove_dir_all(&temp_dir).ok();
         return Err("Extraction failed".into());
     }
     println!("[3] Extraction complete ✔");
 
     println!("[4] Detecting installation folder...");
-    let extracted_path = detect_extracted_folder(&install_dir, archive_path)?;
+
+    let extracted_path = analyze_and_move_extraction(&temp_dir, &install_dir, archive_path)
+        .map_err(|e| {
+            fs::remove_dir_all(&temp_dir).ok();
+            format!("Failed to analyze extraction: {}", e)
+        })?;
+
+    fs::remove_dir_all(&temp_dir).ok();
     println!(
         "[4] Detected installation directory: {} ✔",
         extracted_path.display()
@@ -106,9 +117,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("[4] Inferred app name: {} ✔", app_name);
 
     let exec_path = extracted_path.join("bin");
-    let executables = find_executables_in_bin(&exec_path)?;
+    let executables = if exec_path.exists() && exec_path.is_dir() {
+        find_executables_in_bin(&exec_path)?
+    } else {
+        find_executables_in_bin(&extracted_path)?
+    };
 
-    // Select executable for desktop entry (GUI launcher)
     println!("[5] Select executable for desktop entry (GUI launch):");
     let desktop_exec = if executables.len() == 1 {
         println!(
@@ -150,7 +164,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Create desktop entry if an executable was selected
     if let Some(exec_file) = &desktop_exec {
         println!("[6] Creating desktop entry...");
         let desktop_filename = format!("{}.desktop", app_name);
@@ -163,12 +176,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             Path::new("/usr/share/applications").join(&desktop_filename)
         };
 
-        // Ensure the applications directory exists
         if let Some(parent) = desktop_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Try to find an icon (common locations)
         let icon_path = find_icon(&extracted_path)
             .unwrap_or_else(|| extracted_path.join("bin").join("icon.png"));
 
@@ -193,7 +204,6 @@ Categories=Utility;
         println!("[6] Skipped desktop entry creation ✔");
     }
 
-    // Select executables to add to PATH (for terminal access)
     println!("[7] Select executables to add to PATH (for terminal use):");
     if executables.len() == 1 {
         println!(
@@ -231,7 +241,7 @@ Categories=Utility;
             );
         }
         print!(
-            "  Enter numbers separated by commas (e.g., 1,2,3) or 'all' for all [default: all]: "
+            "  Enter numbers separated by spaces (e.g., 1 2 3) or 'all' for all [default: all]: "
         );
         io::stdout().flush()?;
 
@@ -242,17 +252,13 @@ Categories=Utility;
         let selected_for_path = if selection.is_empty() || selection == "all" {
             executables.clone()
         } else {
-            // Parse comma-separated selection (e.g., "1,2,3")
-            let indices: Result<Vec<usize>, _> = selection
-                .split(',')
+            let indices: Vec<usize> = selection
+                .split_whitespace()
                 .map(|s| {
-                    s.trim()
-                        .parse::<usize>()
+                    s.parse::<usize>()
                         .map_err(|_| "Invalid number format".to_string())
                 })
-                .collect();
-
-            let indices = indices.map_err(|e| e)?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             let mut selected = Vec::new();
             for idx in indices {
@@ -290,19 +296,14 @@ Installation complete! 🎉"
 /// Returns true if we can write to /opt (either as root or with sudo)
 fn check_sudo_permissions() -> bool {
     let opt_path = Path::new("/opt");
-
-    // Try to create a test file in /opt to check write permissions
     let test_file = opt_path.join(".tarsmith_test_write_permissions");
 
-    // Try writing a test file
     match fs::write(&test_file, "test") {
         Ok(_) => {
-            // Successfully wrote, clean up and return true
             fs::remove_file(&test_file).ok();
             true
         }
         Err(_) => {
-            // Can't write, check if sudo is available and works
             let sudo_check = Command::new("sudo").arg("-n").arg("true").output();
 
             if let Ok(output) = sudo_check {
@@ -314,120 +315,139 @@ fn check_sudo_permissions() -> bool {
     }
 }
 
-/// Detects the main extracted directory by trying multiple strategies:
-/// 1. Exact match with archive name
-/// 2. Name variations (handling hyphens/underscores)
-/// 3. Directories containing bin/ folder (sorted by modification time)
-/// 4. Newest directory as fallback
-fn detect_extracted_folder(install_dir: &Path, archive: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    let stem = archive
-        .file_stem()
-        .ok_or("Cannot find archive name")?
-        .to_string_lossy()
-        .replace(".tar", "");
-
-    let candidate = install_dir.join(&stem);
-    if candidate.exists() && candidate.join("bin").exists() {
-        return Ok(candidate);
-    }
-
-    // Extract base name (first component before version/platform suffixes)
-    let stem_first_part = stem
-        .split(&['-', '_'][..])
-        .next()
-        .unwrap_or(&stem)
-        .to_string();
-
-    // Try multiple naming variations (handles both hyphens and underscores)
-    let stem_variants = vec![
-        stem.clone(),
-        stem.replace('_', "-"),
-        stem.replace('-', "_"),
-        stem.split(&['-', '_'][..])
-            .take_while(|p| {
-                !p.chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>()
-            .join("-"),
-        stem.split(&['-', '_'][..])
-            .take_while(|p| {
-                !p.chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>()
-            .join("_"),
-        stem_first_part.clone(),
-    ];
-
-    for variant in stem_variants {
-        let candidate = install_dir.join(&variant);
-        if candidate.exists() && candidate.join("bin").exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Collect directories with bin/ folder, along with their modification times
-    let mut candidates_with_bin: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    for entry in fs::read_dir(install_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() && path.join("bin").exists() {
-            if let Ok(metadata) = fs::metadata(&path) {
-                if let Ok(modified) = metadata.modified() {
-                    candidates_with_bin.push((path, modified));
-                }
-            }
-        }
-    }
-
-    if !candidates_with_bin.is_empty() {
-        // Sort by modification time (newest first) to prioritize recently extracted folders
-        candidates_with_bin.sort_by(|a, b| b.1.cmp(&a.1));
-
-        // Prefer directories matching the archive name, but use newest if multiple matches
-        if let Some(matched) = candidates_with_bin.iter().find(|(p, _)| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| {
-                    let name_lower = n.to_lowercase();
-                    name_lower.starts_with(&stem_first_part.to_lowercase())
-                        || name_lower.contains(&stem_first_part.to_lowercase())
-                })
+/// Extracts a clean directory name from archive stem, removing version/platform suffixes
+fn extract_dir_name_from_stem(stem: &str) -> String {
+    stem.split(&['-', '_'][..])
+        .take_while(|p| {
+            !p.chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
                 .unwrap_or(false)
-        }) {
-            return Ok(matched.0.clone());
-        }
-
-        // Fallback: return newest directory if no name match found
-        return Ok(candidates_with_bin[0].0.clone());
-    }
-
-    // Last resort: find newest directory (ignoring bin/ requirement)
-    let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-    for entry in fs::read_dir(install_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            let metadata = fs::metadata(&path)?;
-            if let Ok(time) = metadata.modified() {
-                if newest.is_none() || time > newest.as_ref().unwrap().1 {
-                    newest = Some((path.clone(), time));
-                }
-            }
-        }
-    }
-
-    newest
-        .map(|n| n.0)
-        .ok_or_else(|| "Unable to detect extracted folder".into())
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
-/// Finds all executable files in the bin/ directory by checking file permissions
+/// Removes existing target path if it exists (handles both files and directories)
+fn remove_existing_target(target_path: &Path) -> Result<(), Box<dyn Error>> {
+    if target_path.exists() {
+        match fs::metadata(target_path) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    fs::remove_dir_all(target_path)?;
+                } else {
+                    fs::remove_file(target_path)?;
+                }
+            }
+            Err(_) => {
+                fs::remove_file(target_path).ok();
+                fs::remove_dir_all(target_path).ok();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Analyzes the temporary extraction and moves it to the final location
+/// Handles both cases: single directory extracted OR files extracted directly
+fn analyze_and_move_extraction(
+    temp_dir: &Path,
+    install_dir: &Path,
+    archive: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let entries: Vec<_> = fs::read_dir(temp_dir)?.collect::<Result<_, _>>()?;
+
+    if entries.is_empty() {
+        return Err("Archive appears to be empty".into());
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+
+    for entry in &entries {
+        let path = entry.path();
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    dirs.push(path);
+                } else if metadata.is_file() {
+                    files.push(path);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let final_path = if dirs.len() == 1 && files.is_empty() {
+        let extracted_dir = &dirs[0];
+        let dir_name = extracted_dir
+            .file_name()
+            .ok_or("Cannot get directory name")?
+            .to_string_lossy()
+            .to_string();
+        let target_path = install_dir.join(&dir_name);
+        remove_existing_target(&target_path)?;
+        fs::rename(extracted_dir, &target_path)?;
+        target_path
+    } else if dirs.is_empty() && !files.is_empty() {
+        let stem = archive
+            .file_stem()
+            .ok_or("Cannot find archive name")?
+            .to_string_lossy()
+            .replace(".tar", "");
+
+        let dir_name = extract_dir_name_from_stem(&stem);
+        let target_path = if dir_name.is_empty() {
+            install_dir.join(&stem)
+        } else {
+            install_dir.join(&dir_name)
+        };
+
+        remove_existing_target(&target_path)?;
+        fs::create_dir_all(&target_path)?;
+
+        for file_path in &files {
+            let file_name = file_path.file_name().ok_or("Cannot get file name")?;
+            let dest = target_path.join(file_name);
+            fs::rename(file_path, &dest)?;
+        }
+
+        target_path
+    } else {
+        let stem = archive
+            .file_stem()
+            .ok_or("Cannot find archive name")?
+            .to_string_lossy()
+            .replace(".tar", "");
+
+        let dir_name = extract_dir_name_from_stem(&stem);
+        let target_path = if dir_name.is_empty() {
+            install_dir.join(&stem)
+        } else {
+            install_dir.join(&dir_name)
+        };
+
+        remove_existing_target(&target_path)?;
+        fs::create_dir_all(&target_path)?;
+
+        for dir_path in &dirs {
+            let dir_name = dir_path.file_name().ok_or("Cannot get directory name")?;
+            let dest = target_path.join(dir_name);
+            fs::rename(dir_path, &dest)?;
+        }
+        for file_path in &files {
+            let file_name = file_path.file_name().ok_or("Cannot get file name")?;
+            let dest = target_path.join(file_name);
+            fs::rename(file_path, &dest)?;
+        }
+
+        target_path
+    };
+
+    Ok(final_path)
+}
+
+/// Finds all executable files in a directory (bin/ or root) by checking file permissions
 fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut executables = Vec::new();
 
@@ -440,7 +460,6 @@ fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                // Check if file has execute permission (0o111 = --x--x--x)
                 if perms.mode() & 0o111 != 0 {
                     executables.push(path);
                 }
@@ -466,7 +485,6 @@ fn infer_app_name(extracted_path: &Path) -> Result<String, Box<dyn Error>> {
     let name = folder_name
         .split('-')
         .take_while(|part| {
-            // Stop when we encounter version numbers or platform identifiers
             !part
                 .chars()
                 .next()
@@ -497,13 +515,9 @@ fn find_icon(extracted_path: &Path) -> Option<PathBuf> {
         extracted_path.join("bin").join("icon.svg"),
     ];
 
-    for icon_path in common_icon_paths {
-        if icon_path.exists() {
-            return Some(icon_path);
-        }
-    }
-
-    None
+    common_icon_paths
+        .into_iter()
+        .find(|icon_path| icon_path.exists())
 }
 
 /// Creates symlinks for selected executables in the appropriate bin directory
@@ -534,7 +548,6 @@ fn create_path_symlinks(
                 .to_string();
             let symlink_path = bin_dir.join(&symlink_name);
 
-            // Remove existing symlink to avoid conflicts
             if symlink_path.exists() || symlink_path.is_symlink() {
                 fs::remove_file(&symlink_path).ok();
             }
@@ -548,7 +561,6 @@ fn create_path_symlinks(
         }
     }
 
-    // For user-level installations, ensure ~/.local/bin is in PATH
     if is_user_level {
         ensure_local_bin_in_path()?;
     }
@@ -579,7 +591,6 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
 
     let local_bin_str = local_bin.to_string_lossy().to_string();
 
-    // Check if already in PATH by examining each component
     if let Ok(path_var) = env::var("PATH") {
         let path_components: Vec<&str> = path_var.split(':').collect();
         if path_components
@@ -591,7 +602,6 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Detect shell type and determine appropriate config file and export syntax
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let (config_file, path_export) = if shell.contains("zsh") {
         let file = dirs::home_dir().unwrap().join(".zshrc");
@@ -605,13 +615,11 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         let export = "set -gx PATH $HOME/.local/bin $PATH";
         (file, export)
     } else {
-        // Default to bash
         let file = dirs::home_dir().unwrap().join(".bashrc");
         let export = "export PATH=\"$HOME/.local/bin:$PATH\"";
         (file, export)
     };
 
-    // Avoid duplicate entries in config file
     if config_file.exists() {
         let contents = fs::read_to_string(&config_file)?;
         if contents.contains("$HOME/.local/bin")
@@ -630,7 +638,6 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Append PATH export to shell config file
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
