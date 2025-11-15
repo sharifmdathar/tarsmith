@@ -7,12 +7,38 @@ use std::process::Command;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
+
     if args.len() < 2 {
         eprintln!("Usage: tarsmith <file.tar.gz>");
+        eprintln!("       tarsmith --version");
+        eprintln!("       tarsmith --help");
         std::process::exit(1);
     }
 
-    let archive_path = Path::new(&args[1]);
+    let first_arg = &args[1];
+
+    if first_arg == "--version" || first_arg == "-V" {
+        println!("tarsmith {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if first_arg == "--help" || first_arg == "-h" {
+        println!("TarSmith - A simple, interactive installer for tar archives");
+        println!();
+        println!("USAGE:");
+        println!("    tarsmith <file.tar.gz>");
+        println!();
+        println!("OPTIONS:");
+        println!("    -h, --help       Print help information");
+        println!("    -V, --version    Print version information");
+        println!();
+        println!("EXAMPLES:");
+        println!("    tarsmith node-v20.0.0-linux-x64.tar.gz");
+        println!("    tarsmith android-studio.tar.gz");
+        return Ok(());
+    }
+
+    let archive_path = Path::new(first_arg);
 
     println!("=== TarSmith Installer ===");
     println!("Input file: {}", archive_path.display());
