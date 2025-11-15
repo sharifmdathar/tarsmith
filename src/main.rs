@@ -15,30 +15,80 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
 
-    let first_arg = &args[1];
+    let mut install_type: Option<bool> = None;
+    let mut no_desktop = false;
+    let mut no_path = false;
+    let mut archive_path: Option<&str> = None;
 
-    if first_arg == "--version" || first_arg == "-V" {
-        println!("tarsmith {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("tarsmith {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!("TarSmith - A simple, interactive installer for tar archives");
+                println!();
+                println!("USAGE:");
+                println!("    tarsmith <file.tar.gz> [OPTIONS]");
+                println!();
+                println!("OPTIONS:");
+                println!("    -s, --system      Install system-wide (/opt)");
+                println!("    -u, --user        Install user-level (~/.local/tarsmith) [default]");
+                println!("    -nd, --no-desktop Skip desktop entry creation");
+                println!("    -np, --no-path    Skip adding executables to PATH");
+                println!("    -h, --help        Print help information");
+                println!("    -V, --version     Print version information");
+                println!();
+                println!("EXAMPLES:");
+                println!("    tarsmith node-v20.0.0-linux-x64.tar.gz");
+                println!("    tarsmith android-studio.tar.gz --user");
+                println!("    tarsmith app.tar.gz --system --no-desktop");
+                return Ok(());
+            }
+            "--system" | "-s" => {
+                if install_type.is_some() {
+                    eprintln!("Error: Cannot specify both --system/-s and --user/-u");
+                    std::process::exit(1);
+                }
+                install_type = Some(false);
+            }
+            "--user" | "-u" => {
+                if install_type.is_some() {
+                    eprintln!("Error: Cannot specify both --system/-s and --user/-u");
+                    std::process::exit(1);
+                }
+                install_type = Some(true);
+            }
+            "--no-desktop" | "-nd" => {
+                no_desktop = true;
+            }
+            "--no-path" | "-np" => {
+                no_path = true;
+            }
+            _ => {
+                if archive_path.is_some() {
+                    eprintln!("Error: Multiple archive files specified");
+                    std::process::exit(1);
+                }
+                if !arg.starts_with('-') {
+                    archive_path = Some(arg);
+                } else {
+                    eprintln!("Error: Unknown option: {}", arg);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
-    if first_arg == "--help" || first_arg == "-h" {
-        println!("TarSmith - A simple, interactive installer for tar archives");
-        println!();
-        println!("USAGE:");
-        println!("    tarsmith <file.tar.gz>");
-        println!();
-        println!("OPTIONS:");
-        println!("    -h, --help       Print help information");
-        println!("    -V, --version    Print version information");
-        println!();
-        println!("EXAMPLES:");
-        println!("    tarsmith node-v20.0.0-linux-x64.tar.gz");
-        println!("    tarsmith android-studio.tar.gz");
-        return Ok(());
-    }
-
-    let archive_path = Path::new(first_arg);
+    let archive_path = match archive_path {
+        Some(path) => Path::new(path),
+        None => {
+            eprintln!("Error: No archive file specified");
+            eprintln!("Usage: tarsmith <file.tar.gz> [OPTIONS]");
+            std::process::exit(1);
+        }
+    };
 
     println!("=== TarSmith Installer ===");
     println!("Input file: {}", archive_path.display());
@@ -49,26 +99,45 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("[1] File exists ✔");
 
-    println!("Choose installation type:");
-    println!("1) User-level (~/.local/tarsmith) [default]");
-    println!("2) System-wide (/opt)");
-    print!("Enter 1 or 2 (default: 1): ");
-    io::stdout().flush()?;
-
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice)?;
-    let choice = choice.trim();
-
-    let (install_dir, is_user_level) = if choice == "2" {
-        if !check_sudo_permissions() {
-            eprintln!("Error: System-wide installation requires sudo privileges.");
-            eprintln!("Please run with: sudo tarsmith {}", archive_path.display());
-            eprintln!("Or choose user-level installation (option 1) which doesn't require sudo.");
-            std::process::exit(1);
+    let (install_dir, is_user_level) = if let Some(user_level) = install_type {
+        if !user_level {
+            if !check_sudo_permissions() {
+                eprintln!("Error: System-wide installation requires sudo privileges.");
+                eprintln!(
+                    "Please run with: sudo tarsmith {} --system",
+                    archive_path.display()
+                );
+                eprintln!("Or use --user for user-level installation which doesn't require sudo.");
+                std::process::exit(1);
+            }
+            (Path::new("/opt").to_path_buf(), false)
+        } else {
+            (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
         }
-        (Path::new("/opt").to_path_buf(), false)
     } else {
-        (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
+        println!("Choose installation type:");
+        println!("1) User-level (~/.local/tarsmith) [default]");
+        println!("2) System-wide (/opt)");
+        print!("Enter 1 or 2 (default: 1): ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        if choice == "2" {
+            if !check_sudo_permissions() {
+                eprintln!("Error: System-wide installation requires sudo privileges.");
+                eprintln!("Please run with: sudo tarsmith {}", archive_path.display());
+                eprintln!(
+                    "Or choose user-level installation (option 1) which doesn't require sudo."
+                );
+                std::process::exit(1);
+            }
+            (Path::new("/opt").to_path_buf(), false)
+        } else {
+            (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
+        }
     };
 
     if !install_dir.exists() {
@@ -149,44 +218,61 @@ fn main() -> Result<(), Box<dyn Error>> {
         find_executables_in_bin(&extracted_path)?
     };
 
-    println!("[5] Select executable for desktop entry (GUI launch):");
-    let desktop_exec = if executables.len() == 1 {
-        println!(
-            "  Only one executable found, using: {}",
-            executables[0]
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        );
-        Some(executables[0].clone())
-    } else {
-        println!("  Executables found:");
-        for (i, exe) in executables.iter().enumerate() {
-            println!(
-                "    {}) {}",
-                i + 1,
-                exe.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-        println!("    0) Skip desktop entry");
-        print!(
-            "  Select executable (0-{}) [default: 0]: ",
-            executables.len()
-        );
-        io::stdout().flush()?;
-
-        let mut selection = String::new();
-        io::stdin().read_line(&mut selection)?;
-        let selection = selection.trim();
-
-        if selection.is_empty() || selection == "0" {
+    let desktop_exec = if no_desktop {
+        None
+    } else if install_type.is_some() {
+        if executables.is_empty() {
             None
         } else {
-            let selection: usize = selection.parse().map_err(|_| "Invalid selection")?;
-            if selection < 1 || selection > executables.len() {
-                return Err("Invalid selection".into());
+            println!(
+                "[5] Using first executable for desktop entry: {}",
+                executables[0]
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+            Some(executables[0].clone())
+        }
+    } else {
+        println!("[5] Select executable for desktop entry (GUI launch):");
+        if executables.len() == 1 {
+            println!(
+                "  Only one executable found, using: {}",
+                executables[0]
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+            Some(executables[0].clone())
+        } else {
+            println!("  Executables found:");
+            for (i, exe) in executables.iter().enumerate() {
+                println!(
+                    "    {}) {}",
+                    i + 1,
+                    exe.file_name().unwrap_or_default().to_string_lossy()
+                );
             }
-            Some(executables[selection - 1].clone())
+            println!("    0) Skip desktop entry");
+            print!(
+                "  Select executable (0-{}) [default: 0]: ",
+                executables.len()
+            );
+            io::stdout().flush()?;
+
+            let mut selection = String::new();
+            io::stdin().read_line(&mut selection)?;
+            let selection = selection.trim();
+
+            if selection.is_empty() || selection == "0" {
+                None
+            } else {
+                let selection: usize = selection.parse().map_err(|_| "Invalid selection")?;
+                if selection < 1 || selection > executables.len() {
+                    return Err("Invalid selection".into());
+                }
+                Some(executables[selection - 1].clone())
+            }
         }
     };
 
@@ -230,77 +316,80 @@ Categories=Utility;
         println!("[6] Skipped desktop entry creation ✔");
     }
 
-    println!("[7] Select executables to add to PATH (for terminal use):");
-    if executables.len() == 1 {
-        println!(
-            "  Only one executable found: {}",
-            executables[0]
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        );
-        print!("  Add to PATH? (Y/n): ");
-        io::stdout().flush()?;
-
-        let mut response = String::new();
-        io::stdin().read_line(&mut response)?;
-        let response = response.trim().to_lowercase();
-
-        let selected_for_path = if response == "n" || response == "no" {
-            Vec::new()
-        } else {
-            vec![executables[0].clone()]
-        };
-
-        if !selected_for_path.is_empty() {
-            create_path_symlinks(&selected_for_path, is_user_level)?;
-        } else {
-            println!("[7] Skipped adding to PATH ✔");
-        }
+    let selected_for_path = if no_path {
+        Vec::new()
+    } else if install_type.is_some() {
+        executables.clone()
     } else {
-        println!("  Executables found:");
-        for (i, exe) in executables.iter().enumerate() {
+        println!("[7] Select executables to add to PATH (for terminal use):");
+        if executables.len() == 1 {
             println!(
-                "    {}) {}",
-                i + 1,
-                exe.file_name().unwrap_or_default().to_string_lossy()
+                "  Only one executable found: {}",
+                executables[0]
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             );
-        }
-        print!(
-            "  Enter numbers separated by spaces (e.g., 1 2 3) or 'all' for all [default: all]: "
-        );
-        io::stdout().flush()?;
+            print!("  Add to PATH? (Y/n): ");
+            io::stdout().flush()?;
 
-        let mut selection = String::new();
-        io::stdin().read_line(&mut selection)?;
-        let selection = selection.trim().to_lowercase();
+            let mut response = String::new();
+            io::stdin().read_line(&mut response)?;
+            let response = response.trim().to_lowercase();
 
-        let selected_for_path = if selection.is_empty() || selection == "all" {
-            executables.clone()
-        } else {
-            let indices: Vec<usize> = selection
-                .split_whitespace()
-                .map(|s| {
-                    s.parse::<usize>()
-                        .map_err(|_| "Invalid number format".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut selected = Vec::new();
-            for idx in indices {
-                if idx < 1 || idx > executables.len() {
-                    return Err(format!("Invalid selection: {}", idx).into());
-                }
-                selected.push(executables[idx - 1].clone());
+            if response == "n" || response == "no" {
+                Vec::new()
+            } else {
+                vec![executables[0].clone()]
             }
-            selected
-        };
-
-        if selected_for_path.is_empty() {
-            println!("[7] Skipped adding to PATH ✔");
         } else {
-            create_path_symlinks(&selected_for_path, is_user_level)?;
+            println!("  Executables found:");
+            for (i, exe) in executables.iter().enumerate() {
+                println!(
+                    "    {}) {}",
+                    i + 1,
+                    exe.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            print!(
+                "  Enter numbers separated by spaces (e.g., 1 2 3) or 'all' for all [default: all]: "
+            );
+            io::stdout().flush()?;
+
+            let mut selection = String::new();
+            io::stdin().read_line(&mut selection)?;
+            let selection = selection.trim().to_lowercase();
+
+            if selection.is_empty() || selection == "all" {
+                executables.clone()
+            } else {
+                let indices: Vec<usize> = selection
+                    .split_whitespace()
+                    .map(|s| {
+                        s.parse::<usize>()
+                            .map_err(|_| "Invalid number format".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let mut selected = Vec::new();
+                for idx in indices {
+                    if idx < 1 || idx > executables.len() {
+                        return Err(format!("Invalid selection: {}", idx).into());
+                    }
+                    selected.push(executables[idx - 1].clone());
+                }
+                selected
+            }
         }
+    };
+
+    if selected_for_path.is_empty() {
+        println!("[7] Skipped adding to PATH ✔");
+    } else {
+        if install_type.is_some() {
+            println!("[7] Adding all executables to PATH...");
+        }
+        create_path_symlinks(&selected_for_path, is_user_level)?;
     }
 
     println!(

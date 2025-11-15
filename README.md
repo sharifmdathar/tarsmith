@@ -12,7 +12,7 @@ A simple, interactive installer for tar archives (`.tar.gz`, `.tar.xz`, `.tar.bz
 - 🛠️ **Multiple Executables**: Select which binaries to add to PATH (useful for tools like Node.js with `node`, `npm`, `npx`, etc.)
 - 🐚 **Shell Detection**: Automatically configures PATH for bash, zsh, or fish shells
 - ✨ **Zero Configuration**: Sensible defaults - just press Enter to accept
-
+- 🚀 **Non-Interactive Mode**: Use command-line flags for automated installations
 
 ## Demo
 
@@ -73,6 +73,15 @@ sudo cp target/release/tarsmith /usr/local/bin/
 tarsmith <archive-file>
 ```
 
+### Command-Line Options
+
+- `-s, --system`: Install system-wide to `/opt` (non-interactive)
+- `-u, --user`: Install user-level to `~/.local/tarsmith` (non-interactive)
+- `-nd, --no-desktop`: Skip desktop entry creation
+- `-np, --no-path`: Skip adding executables to PATH
+- `-h, --help`: Print help information
+- `-V, --version`: Print version information
+
 ### Examples
 
 #### Install Node.js
@@ -108,7 +117,39 @@ tarsmith myapp-1.0.0-linux.tar.gz
 ```
 
 - **Desktop entry**: Select `1` for the main executable
-- **Add to PATH**: Enter `1,3,5` to add specific executables, or `all` for all
+- **Add to PATH**: Enter `1 3 5` to add specific executables (space-separated), or `all` for all
+
+#### Non-Interactive Installation
+
+Install without prompts using command-line flags:
+
+```bash
+# User-level installation (non-interactive)
+tarsmith node-v24.11.1-linux-x64.tar.xz -u
+# or: tarsmith node-v24.11.1-linux-x64.tar.xz --user
+
+# System-wide installation (non-interactive)
+sudo tarsmith android-studio.tar.gz -s
+# or: sudo tarsmith android-studio.tar.gz --system
+
+# Skip desktop entry creation
+tarsmith app.tar.gz -u -nd
+# or: tarsmith app.tar.gz --user --no-desktop
+
+# Skip PATH symlinks
+tarsmith app.tar.gz -u -np
+# or: tarsmith app.tar.gz --user --no-path
+
+# Full non-interactive installation (using shorthand)
+sudo tarsmith app.tar.gz -s -nd -np
+# or: sudo tarsmith app.tar.gz --system --no-desktop --no-path
+```
+
+**Non-interactive mode defaults:**
+
+- When `--system` or `--user` is specified:
+  - Desktop entry: Uses the first executable found (unless `--no-desktop`)
+  - PATH: Adds all executables to PATH (unless `--no-path`)
 
 ## How It Works
 
@@ -162,7 +203,7 @@ This ensures it finds the right folder even if the archive structure is unexpect
 When multiple executables are found, you can:
 
 - Select one for desktop entry (GUI launcher)
-- Select multiple for PATH (comma-separated: `1,2,3` or type `all`)
+- Select multiple for PATH (space-separated: `1 2 3` or type `all`)
 
 Perfect for tools like Node.js where you want `node`, `npm`, `npx`, and `corepack` all available.
 
