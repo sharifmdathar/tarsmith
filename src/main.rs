@@ -1,10 +1,49 @@
 use clap::Parser;
 use std::env;
-use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TarSmithError {
+    #[error("Archive not found: {0}")]
+    ArchiveNotFound(PathBuf),
+
+    #[error("Extraction failed")]
+    ExtractionFailed,
+
+    #[error("Invalid selection: {0}")]
+    InvalidSelection(String),
+
+    #[error("Archive appears to be empty")]
+    ArchiveEmpty,
+
+    #[error("Cannot get directory name from path")]
+    CannotGetDirectoryName,
+
+    #[error("Cannot find archive name")]
+    CannotFindArchiveName,
+
+    #[error("Cannot get file name from path")]
+    CannotGetFileName,
+
+    #[error("Cannot get folder name from path")]
+    CannotGetFolderName,
+
+    #[error("No executable found in bin/ folder")]
+    NoExecutableFound,
+
+    #[error("Cannot determine home directory")]
+    HomeDirectoryNotFound,
+
+    #[error("Invalid number format: {0}")]
+    InvalidNumberFormat(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "tarsmith")]
@@ -27,7 +66,7 @@ struct Args {
     no_path: bool,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), TarSmithError> {
     let args = Args::parse();
 
     let archive_path = &args.archive;
@@ -46,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!();
 
     if !archive_path.exists() {
-        return Err(format!("Archive not found: {}", archive_path.display()).into());
+        return Err(TarSmithError::ArchiveNotFound(archive_path.to_path_buf()));
     }
     println!("[1] File exists ✔");
 
@@ -63,7 +102,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             (Path::new("/opt").to_path_buf(), false)
         } else {
-            (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
+            (dirs::home_dir()
+                .ok_or(TarSmithError::HomeDirectoryNotFound)?
+                .join(".local/tarsmith"), true)
         }
     } else {
         println!("Choose installation type:");
@@ -87,7 +128,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             (Path::new("/opt").to_path_buf(), false)
         } else {
-            (dirs::home_dir().unwrap().join(".local/tarsmith"), true)
+            (dirs::home_dir()
+                .ok_or(TarSmithError::HomeDirectoryNotFound)?
+                .join(".local/tarsmith"), true)
         }
     };
 
@@ -129,7 +172,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::new("tar");
 
     if tar_flags.contains("zstd") {
-        cmd.args(["--zstd", "-xf", archive_path.to_str().unwrap()]);
+        let archive_str = archive_path
+            .to_str()
+            .ok_or_else(|| TarSmithError::InvalidSelection("Invalid archive path encoding".to_string()))?;
+        cmd.args(["--zstd", "-xf", archive_str]);
     } else {
         cmd.arg(tar_flags);
         cmd.arg(archive_path);
@@ -141,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if !status.success() {
         fs::remove_dir_all(&temp_dir).ok();
-        return Err("Extraction failed".into());
+        return Err(TarSmithError::ExtractionFailed);
     }
     println!("[3] Extraction complete ✔");
 
@@ -150,7 +196,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let extracted_path = analyze_and_move_extraction(&temp_dir, &install_dir, archive_path)
         .map_err(|e| {
             fs::remove_dir_all(&temp_dir).ok();
-            format!("Failed to analyze extraction: {}", e)
+            e
         })?;
 
     fs::remove_dir_all(&temp_dir).ok();
@@ -218,9 +264,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             if selection.is_empty() || selection == "0" {
                 None
             } else {
-                let selection: usize = selection.parse().map_err(|_| "Invalid selection")?;
+                let selection: usize = selection.parse().map_err(|_| TarSmithError::InvalidSelection("Invalid number format".to_string()))?;
                 if selection < 1 || selection > executables.len() {
-                    return Err("Invalid selection".into());
+                    return Err(TarSmithError::InvalidSelection(format!("Selection {} is out of range", selection)));
                 }
                 Some(executables[selection - 1].clone())
             }
@@ -232,7 +278,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let desktop_filename = format!("{}.desktop", app_name);
         let desktop_path = if is_user_level {
             dirs::home_dir()
-                .unwrap()
+                .ok_or(TarSmithError::HomeDirectoryNotFound)?
                 .join(".local/share/applications")
                 .join(&desktop_filename)
         } else {
@@ -318,14 +364,14 @@ Categories=Utility;
                     .split_whitespace()
                     .map(|s| {
                         s.parse::<usize>()
-                            .map_err(|_| "Invalid number format".to_string())
+                            .map_err(|_| TarSmithError::InvalidNumberFormat(s.to_string()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
                 let mut selected = Vec::new();
                 for idx in indices {
                     if idx < 1 || idx > executables.len() {
-                        return Err(format!("Invalid selection: {}", idx).into());
+                        return Err(TarSmithError::InvalidSelection(format!("Selection {} is out of range", idx)));
                     }
                     selected.push(executables[idx - 1].clone());
                 }
@@ -358,8 +404,6 @@ Installation complete! 🎉"
     Ok(())
 }
 
-/// Checks if the current user has sudo/root permissions for system-wide installation
-/// Returns true if we can write to /opt (either as root or with sudo)
 fn check_sudo_permissions() -> bool {
     let opt_path = Path::new("/opt");
     let test_file = opt_path.join(".tarsmith_test_write_permissions");
@@ -395,7 +439,7 @@ fn extract_dir_name_from_stem(stem: &str) -> String {
 }
 
 /// Removes existing target path if it exists (handles both files and directories)
-fn remove_existing_target(target_path: &Path) -> Result<(), Box<dyn Error>> {
+fn remove_existing_target(target_path: &Path) -> Result<(), TarSmithError> {
     if target_path.exists() {
         match fs::metadata(target_path) {
             Ok(metadata) => {
@@ -420,11 +464,11 @@ fn analyze_and_move_extraction(
     temp_dir: &Path,
     install_dir: &Path,
     archive: &Path,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<PathBuf, TarSmithError> {
     let entries: Vec<_> = fs::read_dir(temp_dir)?.collect::<Result<_, _>>()?;
 
     if entries.is_empty() {
-        return Err("Archive appears to be empty".into());
+        return Err(TarSmithError::ArchiveEmpty);
     }
 
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -448,7 +492,7 @@ fn analyze_and_move_extraction(
         let extracted_dir = &dirs[0];
         let dir_name = extracted_dir
             .file_name()
-            .ok_or("Cannot get directory name")?
+            .ok_or(TarSmithError::CannotGetDirectoryName)?
             .to_string_lossy()
             .to_string();
         let target_path = install_dir.join(&dir_name);
@@ -458,7 +502,7 @@ fn analyze_and_move_extraction(
     } else if dirs.is_empty() && !files.is_empty() {
         let stem = archive
             .file_stem()
-            .ok_or("Cannot find archive name")?
+            .ok_or(TarSmithError::CannotFindArchiveName)?
             .to_string_lossy()
             .replace(".tar", "");
 
@@ -473,7 +517,7 @@ fn analyze_and_move_extraction(
         fs::create_dir_all(&target_path)?;
 
         for file_path in &files {
-            let file_name = file_path.file_name().ok_or("Cannot get file name")?;
+            let file_name = file_path.file_name().ok_or(TarSmithError::CannotGetFileName)?;
             let dest = target_path.join(file_name);
             fs::rename(file_path, &dest)?;
         }
@@ -482,7 +526,7 @@ fn analyze_and_move_extraction(
     } else {
         let stem = archive
             .file_stem()
-            .ok_or("Cannot find archive name")?
+            .ok_or(TarSmithError::CannotFindArchiveName)?
             .to_string_lossy()
             .replace(".tar", "");
 
@@ -497,12 +541,12 @@ fn analyze_and_move_extraction(
         fs::create_dir_all(&target_path)?;
 
         for dir_path in &dirs {
-            let dir_name = dir_path.file_name().ok_or("Cannot get directory name")?;
+            let dir_name = dir_path.file_name().ok_or(TarSmithError::CannotGetDirectoryName)?;
             let dest = target_path.join(dir_name);
             fs::rename(dir_path, &dest)?;
         }
         for file_path in &files {
-            let file_name = file_path.file_name().ok_or("Cannot get file name")?;
+            let file_name = file_path.file_name().ok_or(TarSmithError::CannotGetFileName)?;
             let dest = target_path.join(file_name);
             fs::rename(file_path, &dest)?;
         }
@@ -514,7 +558,7 @@ fn analyze_and_move_extraction(
 }
 
 /// Finds all executable files in a directory (bin/ or root) by checking file permissions
-fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, TarSmithError> {
     let mut executables = Vec::new();
 
     for entry in fs::read_dir(bin_dir)? {
@@ -534,7 +578,7 @@ fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error
     }
 
     if executables.is_empty() {
-        Err("No executable found in bin/ folder".into())
+        Err(TarSmithError::NoExecutableFound)
     } else {
         Ok(executables)
     }
@@ -542,10 +586,10 @@ fn find_executables_in_bin(bin_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error
 
 /// Extracts a clean application name from the extracted folder path
 /// Removes version numbers and platform suffixes (e.g., "android-studio-2025.2.1.7-linux" -> "android-studio")
-fn infer_app_name(extracted_path: &Path) -> Result<String, Box<dyn Error>> {
+fn infer_app_name(extracted_path: &Path) -> Result<String, TarSmithError> {
     let folder_name = extracted_path
         .file_name()
-        .ok_or("Cannot get folder name")?
+        .ok_or(TarSmithError::CannotGetFolderName)?
         .to_string_lossy();
 
     let name = folder_name
@@ -591,9 +635,11 @@ fn find_icon(extracted_path: &Path) -> Option<PathBuf> {
 fn create_path_symlinks(
     executables: &[PathBuf],
     is_user_level: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), TarSmithError> {
     let bin_dir = if is_user_level {
-        dirs::home_dir().unwrap().join(".local/bin")
+        dirs::home_dir()
+            .ok_or(TarSmithError::HomeDirectoryNotFound)?
+            .join(".local/bin")
     } else {
         Path::new("/usr/local/bin").to_path_buf()
     };
@@ -650,9 +696,9 @@ fn create_path_symlinks(
 
 /// Ensures ~/.local/bin is added to PATH by modifying the user's shell config file
 /// Detects shell type (bash/zsh/fish) and adds appropriate export statement
-fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
+fn ensure_local_bin_in_path() -> Result<(), TarSmithError> {
     let local_bin = dirs::home_dir()
-        .ok_or("Cannot determine home directory")?
+        .ok_or(TarSmithError::HomeDirectoryNotFound)?
         .join(".local/bin");
 
     let local_bin_str = local_bin.to_string_lossy().to_string();
@@ -669,19 +715,20 @@ fn ensure_local_bin_in_path() -> Result<(), Box<dyn Error>> {
     }
 
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let home_dir = dirs::home_dir().ok_or(TarSmithError::HomeDirectoryNotFound)?;
     let (config_file, path_export) = if shell.contains("zsh") {
-        let file = dirs::home_dir().unwrap().join(".zshrc");
+        let file = home_dir.join(".zshrc");
         let export = "export PATH=\"$HOME/.local/bin:$PATH\"";
         (file, export)
     } else if shell.contains("fish") {
-        let file = dirs::home_dir().unwrap().join(".config/fish/config.fish");
+        let file = home_dir.join(".config/fish/config.fish");
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent).ok();
         }
         let export = "set -gx PATH $HOME/.local/bin $PATH";
         (file, export)
     } else {
-        let file = dirs::home_dir().unwrap().join(".bashrc");
+        let file = home_dir.join(".bashrc");
         let export = "export PATH=\"$HOME/.local/bin:$PATH\"";
         (file, export)
     };
