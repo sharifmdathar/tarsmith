@@ -77,8 +77,8 @@ tarsmith <archive-file>
 
 - `-s, --system`: Install system-wide to `/opt` (non-interactive)
 - `-u, --user`: Install user-level to `~/.local/tarsmith` (non-interactive)
-- `-nd, --no-desktop`: Skip desktop entry creation
-- `-np, --no-path`: Skip adding executables to PATH
+- `-d, --no-desktop`: Skip desktop entry creation
+- `-p, --no-path`: Skip adding executables to PATH
 - `-h, --help`: Print help information
 - `-V, --version`: Print version information
 
@@ -133,15 +133,15 @@ sudo tarsmith android-studio.tar.gz -s
 # or: sudo tarsmith android-studio.tar.gz --system
 
 # Skip desktop entry creation
-tarsmith app.tar.gz -u -nd
+tarsmith app.tar.gz -u -d
 # or: tarsmith app.tar.gz --user --no-desktop
 
 # Skip PATH symlinks
-tarsmith app.tar.gz -u -np
+tarsmith app.tar.gz -u -p
 # or: tarsmith app.tar.gz --user --no-path
 
 # Full non-interactive installation (using shorthand)
-sudo tarsmith app.tar.gz -s -nd -np
+sudo tarsmith app.tar.gz -s -d -p
 # or: sudo tarsmith app.tar.gz --system --no-desktop --no-path
 ```
 

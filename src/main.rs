@@ -1,3 +1,4 @@
+use clap::Parser;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -5,90 +6,40 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Parser, Debug)]
+#[command(name = "tarsmith")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "A simple, interactive installer for tar archives", long_about = None)]
+struct Args {
+    #[arg(value_name = "FILE")]
+    archive: PathBuf,
+
+    #[arg(short = 's', long = "system", conflicts_with = "user")]
+    system: bool,
+
+    #[arg(short = 'u', long = "user", conflicts_with = "system")]
+    user: bool,
+
+    #[arg(short = 'd', long = "no-desktop")]
+    no_desktop: bool,
+
+    #[arg(short = 'p', long = "no-path")]
+    no_path: bool,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args = Args::parse();
 
-    if args.len() < 2 {
-        eprintln!("Usage: tarsmith <file.tar.gz>");
-        eprintln!("       tarsmith --version");
-        eprintln!("       tarsmith --help");
-        std::process::exit(1);
-    }
-
-    let mut install_type: Option<bool> = None;
-    let mut no_desktop = false;
-    let mut no_path = false;
-    let mut archive_path: Option<&str> = None;
-
-    for arg in args.iter().skip(1) {
-        match arg.as_str() {
-            "--version" | "-V" => {
-                println!("tarsmith {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            "--help" | "-h" => {
-                println!("TarSmith - A simple, interactive installer for tar archives");
-                println!();
-                println!("USAGE:");
-                println!("    tarsmith <file.tar.gz> [OPTIONS]");
-                println!();
-                println!("OPTIONS:");
-                println!("    -s, --system      Install system-wide (/opt)");
-                println!("    -u, --user        Install user-level (~/.local/tarsmith) [default]");
-                println!("    -nd, --no-desktop Skip desktop entry creation");
-                println!("    -np, --no-path    Skip adding executables to PATH");
-                println!("    -h, --help        Print help information");
-                println!("    -V, --version     Print version information");
-                println!();
-                println!("EXAMPLES:");
-                println!("    tarsmith node-v20.0.0-linux-x64.tar.gz");
-                println!("    tarsmith android-studio.tar.gz --user");
-                println!("    tarsmith app.tar.gz --system --no-desktop");
-                return Ok(());
-            }
-            "--system" | "-s" => {
-                if install_type.is_some() {
-                    eprintln!("Error: Cannot specify both --system/-s and --user/-u");
-                    std::process::exit(1);
-                }
-                install_type = Some(false);
-            }
-            "--user" | "-u" => {
-                if install_type.is_some() {
-                    eprintln!("Error: Cannot specify both --system/-s and --user/-u");
-                    std::process::exit(1);
-                }
-                install_type = Some(true);
-            }
-            "--no-desktop" | "-nd" => {
-                no_desktop = true;
-            }
-            "--no-path" | "-np" => {
-                no_path = true;
-            }
-            _ => {
-                if archive_path.is_some() {
-                    eprintln!("Error: Multiple archive files specified");
-                    std::process::exit(1);
-                }
-                if !arg.starts_with('-') {
-                    archive_path = Some(arg);
-                } else {
-                    eprintln!("Error: Unknown option: {}", arg);
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
-
-    let archive_path = match archive_path {
-        Some(path) => Path::new(path),
-        None => {
-            eprintln!("Error: No archive file specified");
-            eprintln!("Usage: tarsmith <file.tar.gz> [OPTIONS]");
-            std::process::exit(1);
-        }
+    let archive_path = &args.archive;
+    let install_type = if args.system {
+        Some(false)
+    } else if args.user {
+        Some(true)
+    } else {
+        None
     };
+    let no_desktop = args.no_desktop;
+    let no_path = args.no_path;
 
     println!("=== TarSmith Installer ===");
     println!("Input file: {}", archive_path.display());
